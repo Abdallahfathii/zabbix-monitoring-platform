@@ -1,0 +1,190 @@
+# ============================================
+# MONITORING PLATFORM - Docker Compose
+# ============================================
+# This file defines ALL services for the project.
+# Run: docker compose up -d
+# Stop: docker compose down
+# ============================================
+
+services:
+  # ========================================
+  # ZABBIX SERVER + FRONTEND
+  # ========================================
+  # Zabbix Server: the monitoring engine that collects metrics, evaluates triggers, and generates alerts.
+  # Zabbix Frontend: the web interface for configuration and visualization.
+  zabbix-server:
+    image: zabbix/zabbix-server-pgsql:alpine-7.0-latest
+    container_name: zabbix-server
+    restart: unless-stopped
+    environment:
+      DB_SERVER_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      ZBX_CACHESIZE: "512M"
+      ZBX_HISTORYCACHESIZE: "256M"
+    ports:
+      - "10051:10051"   # Zabbix Server: receives active agent connections
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - monitoring-net
+    volumes:
+      - zabbix-server-data:/var/lib/zabbix
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}", "-h", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zabbix-web:
+    image: zabbix/zabbix-web-nginx-pgsql:alpine-7.0-latest
+    container_name: zabbix-web
+    restart: unless-stopped
+    environment:
+      DB_SERVER_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      ZBX_SERVER_HOST: zabbix-server
+      ZBX_SERVER_PORT: 10051
+      PHP_TZ: ${TZ:-UTC}
+    ports:
+      - "8080:8080"     # Zabbix Frontend web interface
+    volumes:
+      - ./zabbix-patches/CMenuHelper.php:/usr/share/zabbix/include/classes/helpers/CMenuHelper.php:ro
+    depends_on:
+      zabbix-server:
+        condition: service_healthy
+    networks:
+      - monitoring-net
+
+  # ========================================
+  # POSTGRESQL DATABASE
+  # ========================================
+  # Stores Zabbix data (hosts, items, triggers, history).
+  # A separate 'monitoring' database holds IoT sensor tables.
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: ${TZ:-UTC}
+    # Store/display timestamps in ${TZ} (e.g. Africa/Cairo) so Adminer matches
+    # the Zabbix dashboard, which renders in the user's timezone.
+    command: ["postgres", "-c", "timezone=${TZ:-UTC}"]
+    ports:
+      - "5432:5432"     # PostgreSQL: direct database access
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d
+    networks:
+      - monitoring-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ========================================
+  # MOSQUITTO MQTT BROKER
+  # ========================================
+  # Receives messages from IoT sensors (publishers) and routes them to subscribers (Python service).
+  # Port 1883: plain MQTT
+  # Port 9001: WebSocket (for browser clients)
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"     # MQTT protocol
+      - "9001:9001"     # MQTT over WebSocket
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    networks:
+      - monitoring-net
+
+  # ========================================
+  # PYTHON SERVICE (FastAPI)
+  # ========================================
+  # Receives IoT data from MQTT, stores in PostgreSQL, generates reports.
+  python-service:
+    build: ./python-service
+    container_name: python-service
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${MONITORING_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      MQTT_BROKER: mosquitto
+      MQTT_PORT: 1883
+      MQTT_TOPIC: "sensors/#"
+      MQTT_TOPIC_EXTRA: "zeta/#"
+      ZABBIX_TRAPPER_HOST: zabbix-server
+      ZABBIX_TRAPPER_PORT: 10051
+      ZABBIX_TRAPPER_HOSTNAME: "Zabbix server"
+      REPORT_INTERVAL_HOURS: "24"
+      # How far back device discovery looks for Zabbix items + zeta dashboard
+      DEVICE_DISCOVERY_DAYS: ${DEVICE_DISCOVERY_DAYS:-90}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "8000:8000"     # FastAPI endpoint
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+      zabbix-server:
+        condition: service_started
+    networks:
+      - monitoring-net
+
+  # ========================================
+  # ZABBIX AGENT (Collector)
+  # ========================================
+  # Collects metrics and sends them to Zabbix Server.
+  # Port 10050: Zabbix agent port
+  zabbix-agent:
+    image: zabbix/zabbix-agent2:alpine-7.0-latest
+    container_name: zabbix-agent
+    restart: unless-stopped
+    environment:
+      ZBX_SERVER_HOST: zabbix-server
+      ZBX_HOSTNAME: "Zabbix server"
+      ZBX_SERVERPORT: 10051
+    networks:
+      - monitoring-net
+
+  # ========================================
+  # ADMINER (Database Dashboard)
+  # ========================================
+  # Web-based database management UI for PostgreSQL.
+  adminer:
+    image: adminer:latest
+    container_name: adminer
+    restart: unless-stopped
+    ports:
+      - "8081:8080"     # Adminer web interface
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - monitoring-net
+
+volumes:
+  postgres-data:
+  zabbix-server-data:
+
+networks:
+  monitoring-net:
+    driver: bridge

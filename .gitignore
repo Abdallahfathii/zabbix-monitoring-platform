@@ -1,0 +1,60 @@
+# ============================================
+# MONITORING PLATFORM - Git Ignore
+# ============================================
+
+# Environment files (secrets)
+.env
+.env.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+*.cover
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+mosquitto/log/*
+!mosquitto/log/.gitkeep
+mosquitto/data/mosquitto.db
+
+# Database
+database/data/
+
+# Docker
+docker-compose.override.yml
+
+# Reports output
+reports/*.csv
+reports/*.xlsx
+reports/*.pdf
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large assets
+*.png
+*.jpg
+*.jpeg
+*.pdf
+!docs/*.png
+!docs/*.jpg
+!docs/*.jpeg
+!docs/*.pdf
